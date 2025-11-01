@@ -359,7 +359,7 @@ def plot_morocco_portugal_coastline_nao_sst_correlation(sst_file, nao_djf_data, 
     plot_lons = longitudes[lon_indices]
     
     # Create the plot
-    fig = plt.figure(figsize=(10, 8))
+    fig = plt.figure(figsize=(12, 10))
     ax = plt.axes(projection=ccrs.PlateCarree())
     
     # Set exact extent for Morocco-Portugal coastline
@@ -369,8 +369,6 @@ def plot_morocco_portugal_coastline_nao_sst_correlation(sst_file, nao_djf_data, 
     ax.add_feature(cfeature.COASTLINE, linewidth=1.2, zorder=2)
     ax.add_feature(cfeature.LAND, color='lightgray', alpha=0.8, zorder=1)
     ax.add_feature(cfeature.OCEAN, color='white', zorder=0)
-    
-   
     
     # Define contour levels
     levels = np.arange(-0.8, 0.81, 0.1)
@@ -406,30 +404,41 @@ def plot_morocco_portugal_coastline_nao_sst_correlation(sst_file, nao_djf_data, 
     gl = ax.gridlines(draw_labels=True, linewidth=0.5, alpha=0.7)
     gl.top_labels = False
     gl.right_labels = False
-    gl.xlocator = plt.FixedLocator([-30, -28, -26, -24, -22, -20, -18, -16, -14, -12, -10, -8, -6])
-    gl.ylocator = plt.FixedLocator([22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42])
-
+    gl.xlocator = plt.FixedLocator([-30, -25, -20, -15, -10, -5])
+    gl.ylocator = plt.FixedLocator([22, 25, 28, 31, 34, 37, 40, 42])
 
     # Add colorbar
     cbar = plt.colorbar(contourf, ax=ax, orientation='horizontal', 
                        pad=0.05, shrink=0.8, aspect=30)
     cbar.set_label('NAO-SST Correlation Coefficient (r)', fontsize=12, fontweight='bold')
     
-    # Add important coastal city markers for reference
+    # Add all coastal city markers for reference
     cities = {
-        'Tangier': (35.78, -5.81),
-        'Rabat': (34.02, -6.83),
+        'Dakhla': (23.71, -15.93),
+        'Boujdour': (26.13, -14.48),
+        'Laayoune': (27.15, -13.20),
+        'Tan-Tan': (28.43, -11.10),
+        'Sidi Ifni': (29.38, -10.18),
+        'Agadir': (30.42, -9.58),
+        'Essaouira': (31.51, -9.77),
+        'Safi': (32.30, -9.24),
         'Casablanca': (33.57, -7.59),
-        'Lisbon': (38.72, -9.14),
-        'Faro': (37.02, -7.93),
+        'Kenitra': (34.25, -6.58),
+        'Tangier': (35.78, -5.81),
+        'Lisbon': (38.72, -9.14),  # Portugal
     }
     
-
+    # Plot cities on the map
+    for city, (lat, lon) in cities.items():
+        ax.plot(lon, lat, 'ko', markersize=4, transform=ccrs.PlateCarree(), zorder=4)
+        ax.text(lon + 0.2, lat + 0.1, city, fontsize=8, 
+                transform=ccrs.PlateCarree(), zorder=4,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor='white', alpha=0.7))
     
     # Set title
     plt.title(f'Winter (DJF) NAO-SST Correlation: Morocco-Portugal Coastline\n' +
              f'({n_years} seasons: {min(valid_winters.keys())}-{max(valid_winters.keys())})\n' +
-             'Region: 32°N-42°N, 10°W-5°W | Red line: p < 0.05 significance', 
+             'Region: 22°N-42°N, 30°W-5°W | Red line: p < 0.05 significance', 
              fontsize=11, pad=20, fontweight='bold')
     
     plt.tight_layout()
