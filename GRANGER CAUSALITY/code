@@ -565,8 +565,28 @@ def calculate_granger_with_specific_lags_ultra_sensitive(data_x, data_y, specifi
         return np.nan, np.nan, np.nan, np.nan
 
 def create_comprehensive_ocean_mask(latitudes, longitudes):
-    """Create ocean mask for Morocco-Portugal coastline region"""
+    """Create ocean mask for Morocco-Portugal coastline region with enhanced coastal detail"""
     ocean_mask = np.ones((len(latitudes), len(longitudes)), dtype=bool)
+    
+    # Atlantic coastal cities coordinates for better masking
+    coastal_cities = [
+        (23.71, -15.93),  # Dakhla
+        (26.13, -14.48),  # Boujdour
+        (27.15, -13.20),  # Laayoune
+        (28.43, -11.10),  # Tan-Tan
+        (29.38, -10.18),  # Sidi Ifni
+
+        (30.42, -9.58),   # Agadir
+        (31.51, -9.77),   # Essaouira
+        (32.30, -9.24),   # Safi
+
+        (33.57, -7.59),   # Casablanca
+    
+        (34.25, -6.58),   # Kenitra
+          
+        (35.78, -5.81),   # Tangier
+        (38.72, -9.14),   # Lisbon
+    ]
     
     for i in range(len(latitudes)):
         for j in range(len(longitudes)):
@@ -574,6 +594,13 @@ def create_comprehensive_ocean_mask(latitudes, longitudes):
             lon = longitudes[j]
             
             is_land = False
+            
+            # Enhanced coastal masking around cities
+            for city_lat, city_lon in coastal_cities:
+                distance = np.sqrt((lat - city_lat)**2 + (lon - city_lon)**2)
+                if distance < 0.3:  # Smaller radius for more precise coastal masking
+                    is_land = True
+                    break
             
             # Portugal coastline
             if (lat >= 36.5 and lat <= 42.0 and lon >= -9.5 and lon <= -6.0):
@@ -588,7 +615,7 @@ def create_comprehensive_ocean_mask(latitudes, longitudes):
             if (lat >= 35.5 and lat <= 36.5 and lon >= -5.8 and lon <= -5.0):
                 is_land = True
             
-            # Morocco coastline
+            # Morocco coastline - enhanced detail
             if (lat >= 33.0 and lat <= 36.0 and lon >= -10.0 and lon <= -5.0):
                 if (lat >= 35.5 and lat <= 36.0 and lon >= -6.0 and lon <= -5.0):
                     is_land = True
@@ -599,18 +626,12 @@ def create_comprehensive_ocean_mask(latitudes, longitudes):
                 elif (lat >= 33.0 and lat <= 33.5 and lon >= -9.0 and lon <= -8.0):
                     is_land = True
             
-            # Additional coastal points
-            if (lat >= 32.0 and lat <= 36.0 and lon >= -10.0 and lon <= -5.0):
-                coastal_cities = [
-                    (35.78, -5.81), (34.02, -6.83), (33.57, -7.59),
-                    (33.24, -8.51), (37.02, -7.93), (38.72, -9.14),
-                    (41.15, -8.61),
-                ]
-                for city_lat, city_lon in coastal_cities:
-                    distance = np.sqrt((lat - city_lat)**2 + (lon - city_lon)**2)
-                    if distance < 0.5:
-                        is_land = True
-                        break
+            # Southern Morocco coastline
+            if (lat >= 28.0 and lat <= 33.0 and lon >= -12.0 and lon <= -8.0):
+                if (lat >= 29.0 and lat <= 30.5 and lon >= -10.5 and lon <= -9.0):
+                    is_land = True
+                elif (lat >= 28.0 and lat <= 29.0 and lon >= -11.5 and lon <= -10.0):
+                    is_land = True
             
             if is_land:
                 ocean_mask[i, j] = False
@@ -923,6 +944,151 @@ def plot_focused_granger_analysis(sst_file_path):
     
     print("\n=== FOCUSED ANALYSIS COMPLETE ===")
 
+def plot_focused_map(ax, data_map, p_value_map, lats, lons, ocean_mask, title, colorbar_label, cmap, vmax=None):
+    """Plot focused map with enhanced visualization"""
+    significant_mask = (p_value_map < 0.05) & ocean_mask
+    data_plot = np.where(significant_mask, data_map, np.nan)
+    
+    ax.set_extent([-30, -5, 20, 42], crs=ccrs.PlateCarree())
+    
+    if np.any(~np.isnan(data_plot)):
+        if vmax is None:
+            vmax = np.nanmax(data_plot) if not np.all(np.isnan(data_plot)) else 1.0
+        
+        levels = np.linspace(0, vmax, 21)
+        
+        contourf = ax.contourf(lons, lats, data_plot, levels=levels, 
+                              cmap=cmap, transform=ccrs.PlateCarree(),
+                              extend='max')
+        
+        # Add significance contours
+        sig_01_mask = (p_value_map < 0.01) & ocean_mask
+        sig_001_mask = (p_value_map < 0.001) & ocean_mask
+        
+        if np.any(sig_001_mask):
+            sig_data = np.where(sig_001_mask, 1.0, 0.0)
+            ax.contour(lons, lats, sig_data, levels=[0.5],
+                      colors='red', linewidths=2.0, transform=ccrs.PlateCarree())
+        elif np.any(sig_01_mask):
+            sig_data = np.where(sig_01_mask, 1.0, 0.0)
+            ax.contour(lons, lats, sig_data, levels=[0.5],
+                      colors='orange', linewidths=1.5, transform=ccrs.PlateCarree())
+        elif np.any(significant_mask):
+            sig_data = np.where(significant_mask, 1.0, 0.0)
+            ax.contour(lons, lats, sig_data, levels=[0.5],
+                      colors='white', linewidths=1.0, transform=ccrs.PlateCarree())
+        
+        plt.colorbar(contourf, ax=ax, orientation='horizontal', 
+                     pad=0.05, shrink=0.8, label=colorbar_label)
+        
+        ax.add_feature(cfeature.COASTLINE, linewidth=1.0, zorder=2)
+        
+        # Add ATLANTIC COASTAL CITIES ONLY
+        cities = {
+            'Dakhla': (23.71, -15.93),
+            'Boujdour': (26.13, -14.48),
+            'Laayoune': (27.15, -13.20),
+            'Tan-Tan': (28.43, -11.10),
+            'Sidi Ifni': (29.38, -10.18),
+            
+            'Agadir': (30.42, -9.58),
+            'Essaouira': (31.51, -9.77),
+            'Safi': (32.30, -9.24),
+            
+            'Casablanca': (33.57, -7.59),
+            
+            'Kenitra': (34.25, -6.58),
+            
+            'Tangier': (35.78, -5.81),
+            'Lisbon': (38.72, -9.14),  # Portugal
+        }
+        
+        for city, (lat, lon) in cities.items():
+            # Only plot cities within the map extent
+            if lat >= 20 and lat <= 42 and lon >= -30 and lon <= -5:
+                ax.plot(lon, lat, 'ko', markersize=3, transform=ccrs.PlateCarree(), zorder=3)
+                # Adjust text position based on city location to avoid overlap
+                offset_x = 0.2
+                offset_y = 0.1
+                ax.text(lon + offset_x, lat + offset_y, city, transform=ccrs.PlateCarree(), 
+                       fontsize=7, zorder=3, ha='left', va='bottom')
+    else:
+        ax.text(0.5, 0.5, 'No significant results', transform=ax.transAxes, 
+                ha='center', va='center', fontsize=10, color='red')
+    
+    ax.add_feature(cfeature.LAND, color='lightgray', alpha=0.7, zorder=1)
+    ax.add_feature(cfeature.OCEAN, color='lightblue', alpha=0.3, zorder=0)
+    
+    gl = ax.gridlines(draw_labels=True, linewidth=0.5, alpha=0.5)
+    gl.top_labels = False
+    gl.right_labels = False
+    
+    ax.set_title(title, fontweight='bold', fontsize=10)
+
+def plot_lag_distribution_focused(ax, lag_map, p_value_map, lats, lons, ocean_mask, title, colorbar_label, cmap, all_lags):
+    """Plot optimal lag distribution for focused analysis"""
+    significant_mask = (p_value_map < 0.05) & ocean_mask
+    lag_plot = np.where(significant_mask, lag_map, np.nan)
+    
+    ax.set_extent([-30, -5, 20, 42], crs=ccrs.PlateCarree())
+    
+    if np.any(~np.isnan(lag_plot)):
+        # Create discrete colormap for lags
+        levels = np.array(all_lags + [max(all_lags) + 1]) - 0.5
+        
+        contourf = ax.contourf(lons, lats, lag_plot, levels=levels, 
+                              cmap=cmap, transform=ccrs.PlateCarree(),
+                              extend='neither')
+        
+        # Create discrete colorbar
+        cbar = plt.colorbar(contourf, ax=ax, orientation='horizontal', 
+                           pad=0.05, shrink=0.8, label=colorbar_label)
+        cbar.set_ticks(all_lags)
+        
+        ax.add_feature(cfeature.COASTLINE, linewidth=1.0, zorder=2)
+        
+        # Add ATLANTIC COASTAL CITIES ONLY (same as above)
+        cities = {
+            'Dakhla': (23.71, -15.93),
+            'Boujdour': (26.13, -14.48),
+            'Laayoune': (27.15, -13.20),
+            'Tan-Tan': (28.43, -11.10),
+            'Sidi Ifni': (29.38, -10.18),
+           
+            'Agadir': (30.42, -9.58),
+            'Essaouira': (31.51, -9.77),
+            'Safi': (32.30, -9.24),
+            
+            'Casablanca': (33.57, -7.59),
+            
+            'Kenitra': (34.25, -6.58),
+            
+            'Tangier': (35.78, -5.81),
+            'Lisbon': (38.72, -9.14),  # Portugal
+        }
+        
+        for city, (lat, lon) in cities.items():
+            # Only plot cities within the map extent
+            if lat >= 20 and lat <= 42 and lon >= -30 and lon <= -5:
+                ax.plot(lon, lat, 'ko', markersize=3, transform=ccrs.PlateCarree(), zorder=3)
+                # Adjust text position based on city location to avoid overlap
+                offset_x = 0.2
+                offset_y = 0.1
+                ax.text(lon + offset_x, lat + offset_y, city, transform=ccrs.PlateCarree(), 
+                       fontsize=7, zorder=3, ha='left', va='bottom')
+    else:
+        ax.text(0.5, 0.5, 'No significant results', transform=ax.transAxes, 
+                ha='center', va='center', fontsize=10, color='red')
+    
+    ax.add_feature(cfeature.LAND, color='lightgray', alpha=0.7, zorder=1)
+    ax.add_feature(cfeature.OCEAN, color='lightblue', alpha=0.3, zorder=0)
+    
+    gl = ax.gridlines(draw_labels=True, linewidth=0.5, alpha=0.5)
+    gl.top_labels = False
+    gl.right_labels = False
+    
+    ax.set_title(title, fontweight='bold', fontsize=10)
+
 def create_focused_plots(results, lats, lons, ocean_mask, all_lags):
     """Create focused plots for the three key relationships"""
     
@@ -1131,115 +1297,6 @@ def create_explanation_figure(results, ocean_mask, all_lags):
     plt.tight_layout(rect=[0, 0, 1, 0.96])  # Make room for suptitle
     plt.savefig('comprehensive_analysis_explanation.png', dpi=300, bbox_inches='tight')
     plt.show()
-
-def plot_focused_map(ax, data_map, p_value_map, lats, lons, ocean_mask, title, colorbar_label, cmap, vmax=None):
-    """Plot focused map with enhanced visualization"""
-    significant_mask = (p_value_map < 0.05) & ocean_mask
-    data_plot = np.where(significant_mask, data_map, np.nan)
-    
-    ax.set_extent([-30, -5, 20, 42], crs=ccrs.PlateCarree())
-    
-    if np.any(~np.isnan(data_plot)):
-        if vmax is None:
-            vmax = np.nanmax(data_plot) if not np.all(np.isnan(data_plot)) else 1.0
-        
-        levels = np.linspace(0, vmax, 21)
-        
-        contourf = ax.contourf(lons, lats, data_plot, levels=levels, 
-                              cmap=cmap, transform=ccrs.PlateCarree(),
-                              extend='max')
-        
-        # Add significance contours
-        sig_01_mask = (p_value_map < 0.01) & ocean_mask
-        sig_001_mask = (p_value_map < 0.001) & ocean_mask
-        
-        if np.any(sig_001_mask):
-            sig_data = np.where(sig_001_mask, 1.0, 0.0)
-            ax.contour(lons, lats, sig_data, levels=[0.5],
-                      colors='red', linewidths=2.0, transform=ccrs.PlateCarree())
-        elif np.any(sig_01_mask):
-            sig_data = np.where(sig_01_mask, 1.0, 0.0)
-            ax.contour(lons, lats, sig_data, levels=[0.5],
-                      colors='orange', linewidths=1.5, transform=ccrs.PlateCarree())
-        elif np.any(significant_mask):
-            sig_data = np.where(significant_mask, 1.0, 0.0)
-            ax.contour(lons, lats, sig_data, levels=[0.5],
-                      colors='white', linewidths=1.0, transform=ccrs.PlateCarree())
-        
-        plt.colorbar(contourf, ax=ax, orientation='horizontal', 
-                     pad=0.05, shrink=0.8, label=colorbar_label)
-        
-        ax.add_feature(cfeature.COASTLINE, linewidth=1.0, zorder=2)
-        
-        # Add reference cities
-        cities = {
-            'Casablanca': (33.57, -7.59),
-            'Rabat': (34.02, -6.83),
-            'Tangier': (35.78, -5.81),
-            'Lisbon': (38.72, -9.14),
-        }
-        
-        for city, (lat, lon) in cities.items():
-            ax.plot(lon, lat, 'ko', markersize=3, transform=ccrs.PlateCarree(), zorder=3)
-            ax.text(lon + 0.2, lat, city, transform=ccrs.PlateCarree(), 
-                   fontsize=7, zorder=3)
-    else:
-        ax.text(0.5, 0.5, 'No significant results', transform=ax.transAxes, 
-                ha='center', va='center', fontsize=10, color='red')
-    
-    ax.add_feature(cfeature.LAND, color='lightgray', alpha=0.7, zorder=1)
-    ax.add_feature(cfeature.OCEAN, color='lightblue', alpha=0.3, zorder=0)
-    
-    gl = ax.gridlines(draw_labels=True, linewidth=0.5, alpha=0.5)
-    gl.top_labels = False
-    gl.right_labels = False
-    
-    ax.set_title(title, fontweight='bold', fontsize=10)
-
-def plot_lag_distribution_focused(ax, lag_map, p_value_map, lats, lons, ocean_mask, title, colorbar_label, cmap, all_lags):
-    """Plot optimal lag distribution for focused analysis"""
-    significant_mask = (p_value_map < 0.05) & ocean_mask
-    lag_plot = np.where(significant_mask, lag_map, np.nan)
-    
-    ax.set_extent([-30, -5, 20, 42], crs=ccrs.PlateCarree())
-    
-    if np.any(~np.isnan(lag_plot)):
-        # Create discrete colormap for lags
-        levels = np.array(all_lags + [max(all_lags) + 1]) - 0.5
-        
-        contourf = ax.contourf(lons, lats, lag_plot, levels=levels, 
-                              cmap=cmap, transform=ccrs.PlateCarree(),
-                              extend='neither')
-        
-        # Create discrete colorbar
-        cbar = plt.colorbar(contourf, ax=ax, orientation='horizontal', 
-                           pad=0.05, shrink=0.8, label=colorbar_label)
-        cbar.set_ticks(all_lags)
-        
-        ax.add_feature(cfeature.COASTLINE, linewidth=1.0, zorder=2)
-        
-        # Add reference cities
-        cities = {
-            'Casablanca': (33.57, -7.59),
-            'Rabat': (34.02, -6.83),
-            'Tangier': (35.78, -5.81),
-            'Lisbon': (38.72, -9.14),
-        }
-        
-        for city, (lat, lon) in cities.items():
-            ax.plot(lon, lat, 'ko', markersize=3, transform=ccrs.PlateCarree(), zorder=3)
-    else:
-        ax.text(0.5, 0.5, 'No significant results', transform=ax.transAxes, 
-                ha='center', va='center', fontsize=10, color='red')
-    
-    ax.add_feature(cfeature.LAND, color='lightgray', alpha=0.7, zorder=1)
-    ax.add_feature(cfeature.OCEAN, color='lightblue', alpha=0.3, zorder=0)
-    
-    gl = ax.gridlines(draw_labels=True, linewidth=0.5, alpha=0.5)
-    gl.top_labels = False
-    gl.right_labels = False
-    
-    ax.set_title(title, fontweight='bold', fontsize=10)
 
 def print_focused_analysis(results, ocean_mask, all_lags):
     """Print detailed analysis of the focused results"""
