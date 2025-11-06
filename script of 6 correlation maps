@@ -1,0 +1,833 @@
+import numpy as np
+import pandas as pd
+import netCDF4 as nc
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from scipy.stats import pearsonr
+from scipy.ndimage import gaussian_filter
+from datetime import datetime
+import os
+
+def calculate_nao_index_netcdf_memory_efficient(file_path, start_year=1978, end_year=2022):
+    """
+    Memory-efficient NAO calculation that processes data in chunks
+    """
+    print("=== CALCULATING NAO INDEX (MEMORY EFFICIENT) ===")
+    
+    dataset = nc.Dataset(file_path, 'r')
+    
+    # Read dimensions
+    time_var = dataset.variables['valid_time']
+    lat_var = dataset.variables['latitude']
+    lon_var = dataset.variables['longitude']
+    mslp_var = dataset.variables['msl']
+    
+    # Convert time to datetime objects
+    times = nc.num2date(time_var[:], time_var.units)
+    regular_times = []
+    for t in times:
+        if hasattr(t, 'year'):
+            regular_times.append(datetime(t.year, t.month, t.day, t.hour, t.minute, t.second))
+        else:
+            regular_times.append(t)
+    
+    # Find indices for our time period
+    start_date = datetime(start_year, 1, 1)
+    end_date = datetime(end_year, 12, 31)
+    time_mask = (np.array(regular_times) >= start_date) & (np.array(regular_times) <= end_date)
+    time_indices = np.where(time_mask)[0]
+    
+    print(f"Processing {len(time_indices)} time steps")
+    
+    # Get coordinates
+    latitudes = lat_var[:]
+    longitudes = lon_var[:]
+    
+    # Convert longitude if needed
+    if longitudes.max() > 180:
+        longitudes_converted = np.where(longitudes > 180, longitudes - 360, longitudes)
+    else:
+        longitudes_converted = longitudes.copy()
+    
+    # Define regions
+    azores_lat_mask = (latitudes <= 45) & (latitudes >= 35)
+    azores_lon_mask = (longitudes_converted >= -45) & (longitudes_converted <= -25)
+    iceland_lat_mask = (latitudes <= 70) & (latitudes >= 55)
+    iceland_lon_mask = (longitudes_converted >= -45) & (longitudes_converted <= -25)
+    
+    azores_lat_indices = np.where(azores_lat_mask)[0]
+    azores_lon_indices = np.where(azores_lon_mask)[0]
+    iceland_lat_indices = np.where(iceland_lat_mask)[0]
+    iceland_lon_indices = np.where(iceland_lon_mask)[0]
+    
+    # Calculate monthly climatology in chunks
+    print("Calculating monthly climatology...")
+    monthly_clim = np.zeros((12, len(latitudes), len(longitudes)))
+    monthly_counts = np.zeros(12)
+    
+    # Process in smaller chunks to save memory
+    chunk_size = 12  # Process one year at a time
+    for chunk_start in range(0, len(time_indices), chunk_size):
+        chunk_end = min(chunk_start + chunk_size, len(time_indices))
+        chunk_indices = time_indices[chunk_start:chunk_end]
+        
+        # Load only the chunk we need
+        mslp_chunk = mslp_var[chunk_indices, :, :] / 100  # Convert Pa to hPa
+        
+        for idx, time_idx in enumerate(chunk_indices):
+            t = regular_times[time_idx]
+            month = t.month - 1
+            
+            monthly_clim[month, :, :] += mslp_chunk[idx, :, :]
+            monthly_counts[month] += 1
+    
+    # Average the climatology
+    for month in range(12):
+        if monthly_counts[month] > 0:
+            monthly_clim[month, :, :] /= monthly_counts[month]
+    
+    # Calculate NAO index in chunks
+    print("Calculating NAO index...")
+    nao_index = np.zeros(len(time_indices))
+    lat_weights = np.cos(np.deg2rad(latitudes))
+    
+    for chunk_start in range(0, len(time_indices), chunk_size):
+        chunk_end = min(chunk_start + chunk_size, len(time_indices))
+        chunk_indices = time_indices[chunk_start:chunk_end]
+        
+        # Load only the chunk we need
+        mslp_chunk = mslp_var[chunk_indices, :, :] / 100  # Convert Pa to hPa
+        
+        for idx, time_idx in enumerate(chunk_indices):
+            t = regular_times[time_idx]
+            month = t.month - 1
+            
+            # Calculate anomaly for this time step
+            mslp_anom = mslp_chunk[idx, :, :] - monthly_clim[month, :, :]
+            
+            # Azores region
+            azores_region = mslp_anom[azores_lat_indices[:, np.newaxis], azores_lon_indices]
+            azores_weights = lat_weights[azores_lat_indices][:, np.newaxis]
+            weighted_sum = np.nansum(azores_region * azores_weights)
+            weight_sum = np.nansum(azores_weights)
+            azores_mean = weighted_sum / weight_sum if weight_sum > 0 else np.nan
+            
+            # Iceland region
+            iceland_region = mslp_anom[iceland_lat_indices[:, np.newaxis], iceland_lon_indices]
+            iceland_weights = lat_weights[iceland_lat_indices][:, np.newaxis]
+            weighted_sum = np.nansum(iceland_region * iceland_weights)
+            weight_sum = np.nansum(iceland_weights)
+            iceland_mean = weighted_sum / weight_sum if weight_sum > 0 else np.nan
+            
+            if not np.isnan(azores_mean) and not np.isnan(iceland_mean):
+                nao_index[chunk_start + idx] = azores_mean - iceland_mean
+            else:
+                nao_index[chunk_start + idx] = np.nan
+    
+    # Normalize
+    nao_index_normalized = (nao_index - np.nanmean(nao_index)) / np.nanstd(nao_index)
+    
+    # Create time series
+    nao_times = [regular_times[i] for i in time_indices]
+    nao_series = pd.Series(nao_index_normalized, index=nao_times, name='NAO_Index')
+    nao_series = nao_series.dropna()
+    
+    dataset.close()
+    
+    print(f"NAO index calculated: {len(nao_series)} values")
+    return nao_series
+
+def calculate_moroccan_upwelling_index_memory_efficient(file_path, start_year=1978, end_year=2022):
+    """
+    Memory-efficient upwelling index calculation
+    """
+    print("=== CALCULATING MOROCCAN UPWELLING INDEX (MEMORY EFFICIENT) ===")
+    
+    dataset = nc.Dataset(file_path, 'r')
+    
+    time_var = dataset.variables['valid_time']
+    lat_var = dataset.variables['latitude']
+    lon_var = dataset.variables['longitude']
+    u10_var = dataset.variables['u10']
+    v10_var = dataset.variables['v10']
+    
+    # Convert time to datetime objects
+    times = nc.num2date(time_var[:], time_var.units)
+    regular_times = []
+    for t in times:
+        if hasattr(t, 'year'):
+            regular_times.append(datetime(t.year, t.month, t.day, t.hour, t.minute, t.second))
+        else:
+            regular_times.append(t)
+    
+    # Find indices for our time period
+    start_date = datetime(start_year, 1, 1)
+    end_date = datetime(end_year, 12, 31)
+    time_mask = (np.array(regular_times) >= start_date) & (np.array(regular_times) <= end_date)
+    time_indices = np.where(time_mask)[0]
+    
+    print(f"Processing {len(time_indices)} time steps")
+    
+    # Get coordinates
+    latitudes = lat_var[:]
+    longitudes = lon_var[:]
+    
+    # Moroccan Atlantic coast region
+    moroccan_lat_range = (20, 35)
+    moroccan_lon_range = (-12, -6)
+    
+    # Convert longitude if needed
+    if longitudes.max() > 180:
+        longitudes_converted = np.where(longitudes > 180, longitudes - 360, longitudes)
+    else:
+        longitudes_converted = longitudes.copy()
+    
+    # Select Moroccan coastal region
+    lat_mask = (latitudes >= moroccan_lat_range[0]) & (latitudes <= moroccan_lat_range[1])
+    lon_mask = (longitudes_converted >= moroccan_lon_range[0]) & (longitudes_converted <= moroccan_lon_range[1])
+    
+    lat_indices = np.where(lat_mask)[0]
+    lon_indices = np.where(lon_mask)[0]
+    
+    print(f"Moroccan region: {len(lat_indices)} lats, {len(lon_indices)} lons")
+    
+    # Physical constants
+    rho_air = 1.22
+    rho_water = 1025.0
+    C_d = 1.3e-3
+    omega = 7.2921e-5
+
+    # Calculate upwelling index in chunks
+    chunk_size = 12
+    upwelling_index = np.zeros(len(time_indices))
+    lat_weights = np.cos(np.deg2rad(latitudes[lat_indices]))[:, np.newaxis]
+    
+    print("Calculating upwelling index...")
+    
+    for chunk_start in range(0, len(time_indices), chunk_size):
+        chunk_end = min(chunk_start + chunk_size, len(time_indices))
+        chunk_indices = time_indices[chunk_start:chunk_end]
+        
+        # Load only the chunk we need
+        u10_chunk = u10_var[chunk_indices, :, :]
+        v10_chunk = v10_var[chunk_indices, :, :]
+        
+        for idx, time_idx in enumerate(chunk_indices):
+            # Extract wind components for Moroccan region only
+            u10_region = u10_chunk[idx, lat_indices[:, np.newaxis], lon_indices]
+            v10_region = v10_chunk[idx, lat_indices[:, np.newaxis], lon_indices]
+
+            # Wind speed magnitude
+            Vmag = np.sqrt(u10_region**2 + v10_region**2)
+
+            # Coriolis parameter
+            f = 2 * omega * np.sin(np.deg2rad(latitudes[lat_indices]))[:, np.newaxis]
+            f = np.where(np.abs(f) < 1e-10, np.nan, f)
+
+            # Ekman transport
+            My = (rho_air * C_d * Vmag * v10_region) / (rho_water * f)
+            transport = -My * 100.0
+
+            # Weighted average over region
+            weighted_sum = np.nansum(transport * lat_weights)
+            weight_sum = np.nansum(lat_weights)
+
+            if weight_sum > 0 and not np.isnan(weighted_sum):
+                upwelling_index[chunk_start + idx] = weighted_sum / weight_sum
+            else:
+                upwelling_index[chunk_start + idx] = np.nan
+    
+    # Normalize
+    upwelling_index_normalized = (upwelling_index - np.nanmean(upwelling_index)) / np.nanstd(upwelling_index)
+    
+    # Create time series
+    upwelling_times = [regular_times[i] for i in time_indices]
+    upwelling_series = pd.Series(upwelling_index_normalized, index=upwelling_times, name='Upwelling_Index')
+    
+    dataset.close()
+    
+    print(f"Upwelling index calculated: {len(upwelling_series)} values")
+    return upwelling_series
+
+def calculate_moroccan_sst_memory_efficient(file_path, start_year=1978, end_year=2022):
+    """
+    Memory-efficient SST calculation for Moroccan region
+    """
+    print("=== CALCULATING MOROCCAN SST (MEMORY EFFICIENT) ===")
+    
+    dataset = nc.Dataset(file_path, 'r')
+    
+    time_var = dataset.variables['valid_time']
+    lat_var = dataset.variables['latitude']
+    lon_var = dataset.variables['longitude']
+    sst_var = dataset.variables['sst']
+    
+    # Convert time to datetime objects
+    times = nc.num2date(time_var[:], time_var.units)
+    regular_times = []
+    for t in times:
+        if hasattr(t, 'year'):
+            regular_times.append(datetime(t.year, t.month, t.day, t.hour, t.minute, t.second))
+        else:
+            regular_times.append(t)
+    
+    # Find indices for our time period
+    start_date = datetime(start_year, 1, 1)
+    end_date = datetime(end_year, 12, 31)
+    time_mask = (np.array(regular_times) >= start_date) & (np.array(regular_times) <= end_date)
+    time_indices = np.where(time_mask)[0]
+    
+    print(f"Processing {len(time_indices)} time steps")
+    
+    # Get coordinates
+    latitudes = lat_var[:]
+    longitudes = lon_var[:]
+    
+    # Moroccan Atlantic region - UPDATED TO 20-42N
+    moroccan_lat_range = (20, 42)
+    moroccan_lon_range = (-30, -5)
+    
+    # Convert longitude if needed
+    if longitudes.max() > 180:
+        longitudes_converted = np.where(longitudes > 180, longitudes - 360, longitudes)
+    else:
+        longitudes_converted = longitudes.copy()
+    
+    # Select Moroccan region
+    lat_mask = (latitudes >= moroccan_lat_range[0]) & (latitudes <= moroccan_lat_range[1])
+    lon_mask = (longitudes_converted >= moroccan_lon_range[0]) & (longitudes_converted <= moroccan_lon_range[1])
+    
+    lat_indices = np.where(lat_mask)[0]
+    lon_indices = np.where(lon_mask)[0]
+    
+    print(f"Moroccan SST region: {len(lat_indices)} lats, {len(lon_indices)} lons")
+    
+    # Calculate SST index in chunks
+    chunk_size = 12
+    sst_index = np.zeros(len(time_indices))
+    lat_weights = np.cos(np.deg2rad(latitudes[lat_indices]))[:, np.newaxis]
+    
+    print("Calculating SST index...")
+    
+    for chunk_start in range(0, len(time_indices), chunk_size):
+        chunk_end = min(chunk_start + chunk_size, len(time_indices))
+        chunk_indices = time_indices[chunk_start:chunk_end]
+        
+        # Load only the chunk we need
+        sst_chunk = sst_var[chunk_indices, :, :]
+        
+        for idx, time_idx in enumerate(chunk_indices):
+            # Extract SST for Moroccan region only
+            sst_region = sst_chunk[idx, lat_indices[:, np.newaxis], lon_indices]
+            
+            # Convert Kelvin to Celsius if needed
+            if sst_region.max() > 200:
+                sst_region = sst_region - 273.15
+            
+            # Weighted average over region
+            weighted_sum = np.nansum(sst_region * lat_weights)
+            weight_sum = np.nansum(lat_weights)
+            
+            if weight_sum > 0:
+                sst_index[chunk_start + idx] = weighted_sum / weight_sum
+            else:
+                sst_index[chunk_start + idx] = np.nan
+    
+    # Normalize
+    sst_index_normalized = (sst_index - np.nanmean(sst_index)) / np.nanstd(sst_index)
+    
+    # Create time series
+    sst_times = [regular_times[i] for i in time_indices]
+    sst_series = pd.Series(sst_index_normalized, index=sst_times, name='SST_Moroccan')
+    
+    dataset.close()
+    
+    print(f"SST index calculated: {len(sst_series)} values")
+    return sst_series
+
+def get_seasonal_data(monthly_series, season):
+    """
+    Extract seasonal means from monthly data
+    """
+    seasonal_data = []
+    seasonal_years = []
+    
+    season_months = {
+        'DJF': [12, 1, 2],
+        'MAM': [3, 4, 5],
+        'JJA': [6, 7, 8],
+        'SON': [9, 10, 11]
+    }[season]
+    
+    years = sorted(monthly_series.index.year.unique())
+    
+    for year in years:
+        if season == 'DJF':
+            # DJF: Dec (prev year) + Jan, Feb (current year)
+            if year == years[0]:
+                continue
+            
+            dec_data = monthly_series[(monthly_series.index.month == 12) & (monthly_series.index.year == year-1)]
+            jan_feb_data = monthly_series[(monthly_series.index.month.isin([1, 2])) & (monthly_series.index.year == year)]
+            season_data = pd.concat([dec_data, jan_feb_data])
+        else:
+            season_data = monthly_series[(monthly_series.index.month.isin(season_months)) & (monthly_series.index.year == year)]
+        
+        if len(season_data) == 3:  # All 3 months present
+            seasonal_data.append(season_data.mean())
+            seasonal_years.append(year)
+    
+    return pd.Series(seasonal_data, index=seasonal_years, name=f'{season}_{monthly_series.name}')
+
+def create_all_indices_from_netcdf(file_path, output_path, start_year=1978, end_year=2022):
+    """
+    Calculate all three indices from NetCDF file and save to CSV
+    """
+    print("=== CALCULATING ALL INDICES FROM NETCDF FILE ===")
+    
+    # Calculate indices
+    nao_monthly = calculate_nao_index_netcdf_memory_efficient(file_path, start_year, end_year)
+    upwelling_monthly = calculate_moroccan_upwelling_index_memory_efficient(file_path, start_year=start_year, end_year=end_year)
+    sst_monthly = calculate_moroccan_sst_memory_efficient(file_path, start_year=start_year, end_year=end_year)
+    
+    # Create seasonal data for all indices
+    seasons = ['DJF', 'MAM', 'JJA', 'SON']
+    seasonal_data = {}
+    
+    for season in seasons:
+        seasonal_df = pd.DataFrame()
+        
+        # Get seasonal data for each index
+        nao_seasonal = get_seasonal_data(nao_monthly, season)
+        upwelling_seasonal = get_seasonal_data(upwelling_monthly, season)
+        sst_seasonal = get_seasonal_data(sst_monthly, season)
+        
+        # Combine into one DataFrame
+        common_years = set(nao_seasonal.index) & set(upwelling_seasonal.index) & set(sst_seasonal.index)
+        common_years = sorted(common_years)
+        
+        seasonal_df['Year'] = common_years
+        seasonal_df['NAO'] = [nao_seasonal[year] for year in common_years]
+        seasonal_df['Upwelling'] = [upwelling_seasonal[year] for year in common_years]
+        seasonal_df['SST'] = [sst_seasonal[year] for year in common_years]
+        
+        seasonal_data[season] = seasonal_df
+        
+        # Save to CSV
+        filename = f"moroccan_seasonal_{season}.csv"
+        file_path = os.path.join(output_path, filename)
+        seasonal_df.to_csv(file_path, index=False)
+        print(f"✓ Saved {season} data: {len(seasonal_df)} years ({common_years[0]}-{common_years[-1]})")
+    
+    return seasonal_data
+
+def create_comprehensive_ocean_mask(latitudes, longitudes):
+    """
+    Create a comprehensive ocean mask that properly excludes ALL land areas
+    """
+    ocean_mask = np.ones((len(latitudes), len(longitudes)), dtype=bool)
+    
+    for i in range(len(latitudes)):
+        for j in range(len(longitudes)):
+            lat = latitudes[i]
+            lon = longitudes[j]
+            
+            # Check if point is land
+            is_land = False
+            
+            # Portugal coastline
+            if (lat >= 36.5 and lat <= 42.0 and lon >= -9.5 and lon <= -6.0):
+                if (lat >= 37.0 and lat <= 38.5 and lon >= -9.0 and lon <= -8.0):
+                    is_land = True
+                elif (lat >= 38.5 and lat <= 41.5 and lon >= -9.0 and lon <= -6.0):
+                    is_land = True
+                elif (lat >= 36.5 and lat <= 37.5 and lon >= -8.5 and lon <= -7.5):
+                    is_land = True
+            
+            # Southern Spain coastline
+            if (lat >= 35.5 and lat <= 36.5 and lon >= -5.8 and lon <= -5.0):
+                is_land = True
+            
+            # Morocco coastline
+            if (lat >= 33.0 and lat <= 36.0 and lon >= -10.0 and lon <= -5.0):
+                if (lat >= 35.5 and lat <= 36.0 and lon >= -6.0 and lon <= -5.0):
+                    is_land = True
+                elif (lat >= 34.0 and lat <= 35.0 and lon >= -7.0 and lon <= -6.0):
+                    is_land = True
+                elif (lat >= 33.5 and lat <= 34.0 and lon >= -8.0 and lon <= -7.0):
+                    is_land = True
+                elif (lat >= 33.0 and lat <= 33.5 and lon >= -9.0 and lon <= -8.0):
+                    is_land = True
+            
+            if is_land:
+                ocean_mask[i, j] = False
+    
+    return ocean_mask
+
+def plot_smooth_correlation_map(sst_file, seasonal_data, season_name, correlation_name, 
+                               var1_col, var2_col, significance_level=0.05):
+    """
+    Create SMOOTH, CLEAN correlation map with professional styling
+    """
+    print(f"=== CREATING SMOOTH {correlation_name.upper()} MAP FOR {season_name} ===")
+    
+    # Calculate actual correlation from seasonal data
+    season_df = seasonal_data[season_name]
+    valid_data = season_df[[var1_col, var2_col]].dropna()
+    
+    if len(valid_data) < 5:
+        print(f"  Not enough data for {correlation_name} in {season_name}")
+        return None
+    
+    actual_correlation = valid_data[var1_col].corr(valid_data[var2_col])
+    n_years_csv = len(valid_data)
+    
+    print(f"  Actual correlation: r = {actual_correlation:.3f} (n={n_years_csv} years)")
+    
+    # Open SST data
+    dataset = nc.Dataset(sst_file, 'r')
+    
+    # Read dimensions
+    time_var = dataset.variables['valid_time']
+    lat_var = dataset.variables['latitude']
+    lon_var = dataset.variables['longitude']
+    sst_var = dataset.variables['sst']
+    
+    # Convert time to datetime objects
+    times = nc.num2date(time_var[:], time_var.units)
+    regular_times = []
+    for t in times:
+        if hasattr(t, 'year'):
+            regular_times.append(datetime(t.year, t.month, t.day, t.hour, t.minute, t.second))
+        else:
+            regular_times.append(t)
+    
+    # Get coordinates
+    latitudes = lat_var[:]
+    longitudes = lon_var[:]
+    
+    # Convert longitude if needed
+    if longitudes.max() > 180:
+        longitudes = np.where(longitudes > 180, longitudes - 360, longitudes)
+    
+    # Focus region
+    lat_min, lat_max = 22, 42
+    lon_min, lon_max = -30, -5
+
+    # Find indices for our region
+    lat_indices = np.where((latitudes >= lat_min) & (latitudes <= lat_max))[0]
+    lon_indices = np.where((longitudes >= lon_min) & (longitudes <= lon_max))[0]
+    
+    # Create ocean mask
+    region_lats = latitudes[lat_indices]
+    region_lons = longitudes[lon_indices]
+    ocean_mask = create_comprehensive_ocean_mask(region_lats, region_lons)
+    
+    # Get seasonal months
+    season_months = {
+        'DJF': [12, 1, 2],
+        'MAM': [3, 4, 5],
+        'JJA': [6, 7, 8],
+        'SON': [9, 10, 11]
+    }[season_name]
+    
+    # Organize by season
+    seasonal_indices = {}
+    for i, t in enumerate(regular_times):
+        if t.month in season_months:
+            year = t.year
+            if year not in seasonal_indices:
+                seasonal_indices[year] = []
+            seasonal_indices[year].append(i)
+    
+    # Keep only complete seasons
+    complete_seasons = {}
+    for year, indices in seasonal_indices.items():
+        if len(indices) == len(season_months):
+            complete_seasons[year] = indices
+    
+    # Match with your data years
+    data_years = season_df['Year'].values
+    valid_seasons = {}
+    
+    for year in data_years:
+        if year in complete_seasons:
+            valid_seasons[year] = complete_seasons[year]
+    
+    print(f"Complete {season_name} seasons: {len(valid_seasons)}")
+    
+    # Load SST data - FIXED VERSION
+    n_years = len(valid_seasons)
+    sst_seasonal = np.full((n_years, len(lat_indices), len(lon_indices)), np.nan)
+    
+    for i, (year, indices) in enumerate(sorted(valid_seasons.items())):
+        season_data = []
+        
+        for idx in indices:
+            try:
+                sst_full = sst_var[idx, :, :]
+                
+                if sst_full.max() > 200:
+                    sst_full = sst_full - 273.15
+                
+                sst_region = sst_full[lat_indices[:, np.newaxis], lon_indices]
+                season_data.append(sst_region)
+            except IndexError:
+                continue
+        
+        if season_data:  # Only calculate mean if we have data
+            sst_seasonal[i] = np.nanmean(season_data, axis=0)
+    
+    # Calculate correlations
+    corr_map = np.full((len(lat_indices), len(lon_indices)), np.nan)
+    p_value_map = np.full((len(lat_indices), len(lon_indices)), np.nan)
+    
+    # Use the actual variable from seasonal data
+    var_data = season_df[var1_col].values[:n_years]
+    
+    for i in range(len(lat_indices)):
+        for j in range(len(lon_indices)):
+            if ocean_mask[i, j]:
+                sst_ts = sst_seasonal[:, i, j]
+                
+                valid_mask = ~np.isnan(sst_ts) & ~np.isnan(var_data)
+                valid_sst = sst_ts[valid_mask]
+                valid_var = var_data[valid_mask]
+                
+                if len(valid_sst) > 10:
+                    try:
+                        corr, p_value = pearsonr(valid_sst, valid_var)
+                        corr_map[i, j] = corr
+                        p_value_map[i, j] = p_value
+                    except:
+                        corr_map[i, j] = np.nan
+                        p_value_map[i, j] = np.nan
+    
+    dataset.close()
+    
+    # Apply Gaussian filter for SMOOTHING
+    sigma = 1.5  # Smoothing parameter
+    corr_smooth = corr_map.copy()
+    valid_mask = ~np.isnan(corr_map)
+    
+    if np.any(valid_mask):
+        # Create temporary array for smoothing
+        temp_array = corr_map.copy()
+        temp_array[~valid_mask] = 0  # Fill NaNs with 0 for smoothing
+        smoothed = gaussian_filter(temp_array, sigma=sigma)
+        
+        # Only keep smoothed values where we originally had data
+        corr_smooth[valid_mask] = smoothed[valid_mask]
+    
+    # Create coordinate arrays
+    plot_lats = latitudes[lat_indices]
+    plot_lons = longitudes[lon_indices]
+    
+    # Create the plot with PROFESSIONAL STYLING - VERTICAL COLORBAR
+    fig = plt.figure(figsize=(15, 12))  # Adjusted for vertical colorbar
+    ax = plt.axes(projection=ccrs.PlateCarree())
+    
+    ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=ccrs.PlateCarree())
+
+    # Add clean map features
+    ax.add_feature(cfeature.COASTLINE, linewidth=1.2, zorder=2, edgecolor='black')
+    ax.add_feature(cfeature.LAND, color='lightgray', alpha=0.6, zorder=1)
+    ax.add_feature(cfeature.OCEAN, color='white', zorder=0)
+    
+    # WIDE SPACING CONTOUR LEVELS - ONLY MAJOR LEVELS
+    levels = np.arange(-0.9, 1.0, 0.3)  # Very wide spacing
+    
+    # Create masked array for land points
+    corr_masked = np.where(ocean_mask, corr_smooth, np.nan)
+    
+    # Plot SMOOTH correlation contours
+    contourf = ax.contourf(plot_lons, plot_lats, corr_masked, levels=levels, 
+                          cmap='RdBu_r', transform=ccrs.PlateCarree(),
+                          extend='both', zorder=0, alpha=0.9)
+    
+    # Plot ONLY MAJOR contour lines with clean styling
+    contours = ax.contour(plot_lons, plot_lats, corr_masked, levels=levels, 
+                         colors='black', linewidths=1.5, transform=ccrs.PlateCarree(),
+                         zorder=1, alpha=0.8)
+    
+    # Add clean contour labels
+    plt.clabel(contours, inline=True, fontsize=11, fmt='%.1f')
+    
+    # Plot significance as subtle stippling
+    sig_mask = (p_value_map < significance_level) & ocean_mask
+    
+    if np.any(sig_mask):
+        lon_grid, lat_grid = np.meshgrid(plot_lons, plot_lats)
+        sig_contour_data = np.where(sig_mask, 1.0, 0.0)
+        
+        # Use contourf for significance with hatches
+        sig_contourf = ax.contourf(lon_grid, lat_grid, sig_contour_data, 
+                                  levels=[0.5, 1.5], colors='none', 
+                                  hatches=['...'], transform=ccrs.PlateCarree(),
+                                  alpha=0, zorder=2)
+        print(f"Significant regions: {np.sum(sig_mask)} points")
+    
+    # Add clean grid lines
+    gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.3, linestyle='--')
+    gl.top_labels = False
+    gl.right_labels = False
+    gl.xlocator = plt.FixedLocator([-30, -25, -20, -15, -10, -5])
+    gl.ylocator = plt.FixedLocator([25, 30, 35, 40])
+    gl.xlabel_style = {'size': 10}
+    gl.ylabel_style = {'size': 10}
+
+    # Add professional VERTICAL colorbar on the RIGHT
+    cbar = plt.colorbar(contourf, ax=ax, orientation='vertical', 
+                       pad=0.05, shrink=0.8, aspect=20)  # Vertical orientation
+    cbar.set_label('Correlation Coefficient (r)', fontsize=14, fontweight='bold', labelpad=15)
+    cbar.ax.tick_params(labelsize=12)
+    
+    # Add ALL coastal cities with black dots
+    cities = {
+        'Dakhla': (23.71, -15.93),
+        'Boujdour': (26.13, -14.48),
+        'Laayoune': (27.15, -13.20),
+        'Tan-Tan': (28.43, -11.10),
+        'Sidi Ifni': (29.38, -10.18),
+        'Agadir': (30.42, -9.58),
+        'Essaouira': (31.51, -9.77),
+        'Safi': (32.30, -9.24),
+        'Casablanca': (33.57, -7.59),
+        'Kenitra': (34.25, -6.58),
+        'Tangier': (35.78, -5.81),
+        'Lisbon': (38.72, -9.14),
+    }
+    
+    for city, (lat, lon) in cities.items():
+        # Black dots exactly like your second code
+        ax.plot(lon, lat, 'ko', markersize=3, transform=ccrs.PlateCarree(), zorder=4)
+        ax.text(lon + 0.3, lat + 0.15, city, fontsize=8, 
+                transform=ccrs.PlateCarree(), zorder=4,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor='white', alpha=0.8))
+    
+    # Set clean, professional title
+    strength = "Strong" if abs(actual_correlation) > 0.5 else "Moderate" if abs(actual_correlation) > 0.3 else "Weak"
+    direction = "positive" if actual_correlation > 0 else "negative"
+    
+    title = f'{season_name} {correlation_name} Correlation\nMorocco-Portugal Coastline ({min(valid_seasons.keys())}-{max(valid_seasons.keys())})'
+    plt.title(title, fontsize=16, pad=20, fontweight='bold')
+    
+    # Add subtitle with key info - NOW NO OVERLAP with vertical colorbar!
+    ax.text(0.5, -0.12, f'Overall correlation: r = {actual_correlation:.3f} ({strength} {direction}) | Dotted areas: p < 0.05', 
+            transform=ax.transAxes, fontsize=12, ha='center', va='top')
+    
+    plt.tight_layout()
+    
+    # Save with high quality
+    filename = f'PRO_{season_name}_{correlation_name.replace("–", "_")}_correlation.png'
+    plt.savefig(filename, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.show()
+    
+    # Print clean statistics
+    valid_corrs = corr_map[~np.isnan(corr_map)]
+    
+    print(f"\nSTATISTICS - {correlation_name} ({season_name}):")
+    print(f"  Ocean points: {len(valid_corrs)}")
+    print(f"  Significant points: {np.sum(sig_mask)}")
+    print(f"  Mean correlation: {np.nanmean(valid_corrs):.3f}")
+    print(f"  Range: {np.nanmin(valid_corrs):.3f} to {np.nanmax(valid_corrs):.3f}")
+    print(f"  Smoothing: Gaussian filter (σ={sigma})")
+    
+    return corr_smooth, p_value_map, plot_lats, plot_lons, actual_correlation
+
+def create_all_smooth_correlation_maps(base_path, sst_file_path):
+    """
+    Create all correlation maps with smooth, professional styling
+    """
+    print("=== CREATING SMOOTH PROFESSIONAL CORRELATION MAPS ===")
+    
+    # First calculate all indices from NetCDF
+    print("STEP 1: CALCULATING INDICES FROM NETCDF...")
+    seasonal_data = create_all_indices_from_netcdf(sst_file_path, base_path)
+    
+    if not seasonal_data:
+        print("No seasonal data calculated! Please check the file paths.")
+        return
+    
+    # Define key correlations to plot
+    key_correlations = [
+        # DJF correlations
+        ('DJF', 'NAO–Upwelling', 'NAO', 'Upwelling'),
+        ('DJF', 'NAO–SST', 'NAO', 'SST'),
+        ('DJF', 'Upwelling–SST', 'Upwelling', 'SST'),
+        
+        # SON correlations
+        ('SON', 'NAO–Upwelling', 'NAO', 'Upwelling'),
+        ('SON', 'NAO–SST', 'NAO', 'SST'),
+        ('SON', 'Upwelling–SST', 'Upwelling', 'SST'),
+    ]
+    
+    results = {}
+    
+    for season_name, correlation_name, var1, var2 in key_correlations:
+        if season_name in seasonal_data:
+            print(f"\n{'='*70}")
+            print(f"PROCESSING: {season_name} - {correlation_name}")
+            print(f"{'='*70}")
+            
+            try:
+                corr_map, p_map, lats, lons, actual_corr = plot_smooth_correlation_map(
+                    sst_file_path, seasonal_data, season_name, correlation_name, var1, var2
+                )
+                
+                if corr_map is not None:
+                    results[f"{season_name}_{correlation_name}"] = {
+                        'corr_map': corr_map,
+                        'p_map': p_map,
+                        'lats': lats,
+                        'lons': lons,
+                        'actual_correlation': actual_corr
+                    }
+                    print(f"✓ Successfully created {season_name} {correlation_name} map")
+                    
+            except Exception as e:
+                print(f"✗ Error processing {season_name} {correlation_name}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"\n{season_name}: No data available")
+    
+    return results
+
+# Run the analysis
+if __name__ == "__main__":
+    base_path = "C:/Users/moham/OneDrive/Documents/Climate_Project"
+    sst_file_path = "C:/Users/moham/OneDrive/Documents/Climate_Project/dadefda24611707dd32599a670df250b.nc"
+    
+    print("PROFESSIONAL SMOOTH CORRELATION MAPS")
+    print("="*80)
+    print("KEY FEATURES:")
+    print("• All indices calculated directly from NetCDF file")
+    print("• Gaussian smoothing for clean patterns")
+    print("• Wide contour spacing (0.3 intervals)")
+    print("• Professional color scheme and styling")
+    print("• Clean, uncluttered layout")
+    print("• VERTICAL COLORBAR on the right - no text overlap!")
+    print("• High-quality output for analysis")
+    print("• All coastal cities with black dots")
+    print("="*80)
+    
+    try:
+        results = create_all_smooth_correlation_maps(base_path, sst_file_path)
+        
+        print("\n" + "="*80)
+        print("PROFESSIONAL CORRELATION MAPS COMPLETED!")
+        print("="*80)
+        
+        if results:
+            print(f"Successfully created {len(results)} correlation maps:")
+            for key in results.keys():
+                print(f"  ✓ {key}")
+        else:
+            print("No maps were created. Check the errors above.")
+            
+    except Exception as e:
+        print(f"Fatal error: {str(e)}")
+        import traceback
+        traceback.print_exc()
