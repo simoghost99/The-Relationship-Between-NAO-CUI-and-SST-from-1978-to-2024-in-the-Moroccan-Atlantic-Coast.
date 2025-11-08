@@ -68,7 +68,7 @@ def calculate_nao_index_netcdf_memory_efficient(file_path, start_year=1978, end_
     for start in range(0, len(time_indices), chunk_size):
         end = min(start + chunk_size, len(time_indices))
         idx = time_indices[start:end]
-        mslp = mslp_var[idx, :, :] / 100
+        mslp = mslp_var[idx, :, :] 
         for i, t_idx in enumerate(idx):
             m = regular_times[t_idx].month - 1
             anom = mslp[i] - monthly_clim[m]
